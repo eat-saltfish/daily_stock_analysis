@@ -23,6 +23,10 @@ from enum import Enum
 
 from src.config import Config, get_config
 from src.enums import ReportType
+from src.notification_routing import (
+    get_notification_route_config,
+    split_notification_route_channels,
+)
 from src.report_language import (
     get_localized_stock_name,
     get_report_labels,
@@ -341,6 +345,42 @@ class NotificationService(
     def get_available_channels(self) -> List[NotificationChannel]:
         """获取所有已配置的渠道"""
         return self._available_channels
+
+    def get_channels_for_route(
+        self,
+        route_type: Optional[str],
+        channels: Optional[List[NotificationChannel]] = None,
+    ) -> List[NotificationChannel]:
+        """Return channels allowed for a route type.
+
+        ``route_type=None`` keeps the legacy behavior and returns all supplied
+        static channels. Empty route config also keeps all supplied channels.
+        Non-empty route config that matches no enabled channel returns an empty
+        list.
+        """
+        target_channels = list(channels if channels is not None else self._available_channels)
+        if route_type is None:
+            return target_channels
+
+        route_config = get_notification_route_config(route_type)
+        if route_config is None:
+            logger.warning("未知通知路由类型 %s，沿用全部已配置渠道", route_type)
+            return target_channels
+
+        configured_route_channels = getattr(self._config, route_config["config_attr"], []) or []
+        if not configured_route_channels:
+            return target_channels
+
+        valid_channels, invalid_channels = split_notification_route_channels(configured_route_channels)
+        if invalid_channels:
+            logger.warning(
+                "%s 包含未知通知渠道，将忽略: %s",
+                route_config["env_key"],
+                ", ".join(invalid_channels),
+            )
+
+        allowed = set(valid_channels)
+        return [channel for channel in target_channels if channel.value in allowed]
     
     def get_channel_names(self) -> str:
         """获取所有已配置渠道的名称"""
@@ -948,63 +988,64 @@ class NotificationService(
 
                 self._append_market_snapshot(report_lines, result)
                 
-                # ========== 数据透视 ==========
-                data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
-                if data_persp:
-                    trend_data = data_persp.get('trend_status', {})
-                    price_data = data_persp.get('price_position', {})
-                    vol_data = data_persp.get('volume_analysis', {})
-                    chip_data = data_persp.get('chip_structure', {})
-                    
-                    report_lines.extend([
-                        f"### 📊 {labels['data_perspective_heading']}",
-                        "",
-                    ])
-                    # 趋势状态
-                    if trend_data:
-                        is_bullish = (
-                            f"✅ {labels['yes_label']}"
-                            if trend_data.get('is_bullish', False)
-                            else f"❌ {labels['no_label']}"
-                        )
+                # ========== 数据透视 (simple模式跳过) ==========
+                if getattr(config, 'report_type', 'simple') != 'simple':
+                    data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
+                    if data_persp:
+                        trend_data = data_persp.get('trend_status', {})
+                        price_data = data_persp.get('price_position', {})
+                        vol_data = data_persp.get('volume_analysis', {})
+                        chip_data = data_persp.get('chip_structure', {})
+
                         report_lines.extend([
-                            f"**{labels['ma_alignment_label']}**: {trend_data.get('ma_alignment', 'N/A')} | "
-                            f"{labels['bullish_alignment_label']}: {is_bullish} | "
-                            f"{labels['trend_strength_label']}: {trend_data.get('trend_score', 'N/A')}/100",
+                            f"### 📊 {labels['data_perspective_heading']}",
                             "",
                         ])
-                    # 价格位置
-                    if price_data:
-                        bias_status = price_data.get('bias_status', 'N/A')
-                        report_lines.extend([
-                            f"| {labels['price_metrics_label']} | {labels['current_price_label']} |",
-                            "|---------|------|",
-                            f"| {labels['current_price_label']} | {price_data.get('current_price', 'N/A')} |",
-                            f"| {labels['ma5_label']} | {price_data.get('ma5', 'N/A')} |",
-                            f"| {labels['ma10_label']} | {price_data.get('ma10', 'N/A')} |",
-                            f"| {labels['ma20_label']} | {price_data.get('ma20', 'N/A')} |",
-                            f"| {labels['bias_ma5_label']} | {price_data.get('bias_ma5', 'N/A')}% {bias_status} |",
-                            f"| {labels['support_level_label']} | {price_data.get('support_level', 'N/A')} |",
-                            f"| {labels['resistance_level_label']} | {price_data.get('resistance_level', 'N/A')} |",
-                            "",
-                        ])
-                    # 量能分析
-                    if vol_data:
-                        report_lines.extend([
-                            f"**{labels['volume_label']}**: {labels['volume_ratio_label']} {vol_data.get('volume_ratio', 'N/A')} ({vol_data.get('volume_status', '')}) | "
-                            f"{labels['turnover_rate_label']} {vol_data.get('turnover_rate', 'N/A')}%",
-                            f"💡 *{vol_data.get('volume_meaning', '')}*",
-                            "",
-                        ])
-                    # 筹码结构
-                    if chip_data:
-                        chip_health = localize_chip_health(chip_data.get('chip_health', 'N/A'), report_language)
-                        report_lines.extend([
-                            f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
-                            f"{chip_data.get('concentration', 'N/A')} {chip_health}",
-                            "",
-                        ])
-                
+                        # 趋势状态
+                        if trend_data:
+                            is_bullish = (
+                                f"✅ {labels['yes_label']}"
+                                if trend_data.get('is_bullish', False)
+                                else f"❌ {labels['no_label']}"
+                            )
+                            report_lines.extend([
+                                f"**{labels['ma_alignment_label']}**: {trend_data.get('ma_alignment', 'N/A')} | "
+                                f"{labels['bullish_alignment_label']}: {is_bullish} | "
+                                f"{labels['trend_strength_label']}: {trend_data.get('trend_score', 'N/A')}/100",
+                                "",
+                            ])
+                        # 价格位置
+                        if price_data:
+                            bias_status = price_data.get('bias_status', 'N/A')
+                            report_lines.extend([
+                                f"| {labels['price_metrics_label']} | {labels['current_price_label']} |",
+                                "|---------|------|",
+                                f"| {labels['current_price_label']} | {price_data.get('current_price', 'N/A')} |",
+                                f"| {labels['ma5_label']} | {price_data.get('ma5', 'N/A')} |",
+                                f"| {labels['ma10_label']} | {price_data.get('ma10', 'N/A')} |",
+                                f"| {labels['ma20_label']} | {price_data.get('ma20', 'N/A')} |",
+                                f"| {labels['bias_ma5_label']} | {price_data.get('bias_ma5', 'N/A')}% {bias_status} |",
+                                f"| {labels['support_level_label']} | {price_data.get('support_level', 'N/A')} |",
+                                f"| {labels['resistance_level_label']} | {price_data.get('resistance_level', 'N/A')} |",
+                                "",
+                            ])
+                        # 量能分析
+                        if vol_data:
+                            report_lines.extend([
+                                f"**{labels['volume_label']}**: {labels['volume_ratio_label']} {vol_data.get('volume_ratio', 'N/A')} ({vol_data.get('volume_status', '')}) | "
+                                f"{labels['turnover_rate_label']} {vol_data.get('turnover_rate', 'N/A')}%",
+                                f"💡 *{vol_data.get('volume_meaning', '')}*",
+                                "",
+                            ])
+                        # 筹码结构
+                        if chip_data:
+                            chip_health = localize_chip_health(chip_data.get('chip_health', 'N/A'), report_language)
+                            report_lines.extend([
+                                f"**{labels['chip_label']}**: {chip_data.get('profit_ratio', 'N/A')} | {chip_data.get('avg_cost', 'N/A')} | "
+                                f"{chip_data.get('concentration', 'N/A')} {chip_health}",
+                                "",
+                            ])
+
                 # ========== 作战计划 ==========
                 battle = dashboard.get('battle_plan', {}) if dashboard else {}
                 if battle:
@@ -1585,7 +1626,8 @@ class NotificationService(
         self,
         content: str,
         email_stock_codes: Optional[List[str]] = None,
-        email_send_to_all: bool = False
+        email_send_to_all: bool = False,
+        route_type: Optional[str] = None,
     ) -> bool:
         """
         统一发送接口 - 向所有已配置的渠道发送
@@ -1602,6 +1644,7 @@ class NotificationService(
             content: 消息内容（Markdown 格式）
             email_stock_codes: 股票代码列表（可选，用于邮件渠道路由到对应分组邮箱，Issue #268）
             email_send_to_all: 邮件是否发往所有配置邮箱（用于大盘复盘等无股票归属的内容）
+            route_type: 通知路由类型；None 保持旧行为，report/alert/system_error 按配置过滤静态渠道
 
         Returns:
             是否至少有一个渠道发送成功
@@ -1615,11 +1658,19 @@ class NotificationService(
             logger.warning("通知服务不可用，跳过推送")
             return False
 
+        target_channels = self.get_channels_for_route(route_type)
+        if not target_channels:
+            if context_success:
+                logger.info("已通过消息上下文渠道完成推送（路由后无其他通知渠道）")
+                return True
+            logger.warning("通知路由 %s 未命中任何已配置渠道，跳过静态通知渠道", route_type)
+            return False
+
         # Markdown to image (Issue #289): convert once if any channel needs it.
         # Per-channel decision via _should_use_image_for_channel (see send() docstring for fallback rules).
         image_bytes = None
         channels_needing_image = {
-            ch for ch in self._available_channels
+            ch for ch in target_channels
             if ch.value in self._markdown_to_image_channels
         }
         if channels_needing_image:
@@ -1645,13 +1696,13 @@ class NotificationService(
                     hint,
                 )
 
-        channel_names = self.get_channel_names()
-        logger.info(f"正在向 {len(self._available_channels)} 个渠道发送通知：{channel_names}")
+        channel_names = ', '.join(ChannelDetector.get_channel_name(ch) for ch in target_channels)
+        logger.info(f"正在向 {len(target_channels)} 个渠道发送通知：{channel_names}")
 
         success_count = 0
         fail_count = 0
 
-        for channel in self._available_channels:
+        for channel in target_channels:
             channel_name = ChannelDetector.get_channel_name(channel)
             use_image = self._should_use_image_for_channel(channel, image_bytes)
             try:
