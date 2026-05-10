@@ -986,8 +986,9 @@ class NotificationService(
                         "",
                     ])
 
-                self._append_market_snapshot(report_lines, result)
-                
+                if getattr(config, 'report_type', 'simple') != 'simple':
+                    self._append_market_snapshot(report_lines, result)
+
                 # ========== 数据透视 (simple模式跳过) ==========
                 if getattr(config, 'report_type', 'simple') != 'simple':
                     data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
@@ -1076,16 +1077,17 @@ class NotificationService(
                             f"- {labels['risk_control_label']}: {position.get('risk_control', 'N/A')}",
                             "",
                         ])
-                    # 检查清单
-                    checklist = battle.get('action_checklist', []) if battle else []
-                    if checklist:
-                        report_lines.extend([
-                            f"**✅ {labels['checklist_heading']}**",
-                            "",
-                        ])
-                        for item in checklist:
-                            report_lines.append(f"- {item}")
-                        report_lines.append("")
+                    # 检查清单 (simple模式跳过)
+                    if getattr(config, 'report_type', 'simple') != 'simple':
+                        checklist = battle.get('action_checklist', []) if battle else []
+                        if checklist:
+                            report_lines.extend([
+                                f"**✅ {labels['checklist_heading']}**",
+                                "",
+                            ])
+                            for item in checklist:
+                                report_lines.append(f"- {item}")
+                            report_lines.append("")
                 
                 # 如果没有 dashboard，显示传统格式
                 if not dashboard:
